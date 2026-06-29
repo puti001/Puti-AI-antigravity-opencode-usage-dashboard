@@ -85,7 +85,8 @@ try:
     class FloatingDashboard:
         def __init__(self, root):
             self.root = root
-            self.root.title("Antigravity Stats")
+            # 融入品牌 IP 識別：Puti-AI
+            self.root.title("Puti-AI Antigravity Stats")
             
             # 無邊框、半透明、最上層
             self.root.overrideredirect(True)
@@ -315,7 +316,7 @@ try:
             self.card_gemini = tk.Frame(self.anti_view, bg=self.card_color, highlightbackground=self.border_color, highlightthickness=1)
             self.card_gemini.pack(fill="x", pady=4)
             
-            self.lbl_gem_title = tk.Label(self.card_gemini, text="Gemini Models", font=("Microsoft JhengHei", 9, "bold"), bg=self.card_color, fg=self.txt_secondary)
+            self.lbl_gem_title = tk.Label(self.card_gemini, text="Puti-AI Gemini Models", font=("Microsoft JhengHei", 9, "bold"), bg=self.card_color, fg=self.txt_secondary)
             self.lbl_gem_title.pack(anchor="w", padx=12, pady=(6, 2))
             
             frame_gem_rings = tk.Frame(self.card_gemini, bg=self.card_color)
@@ -339,7 +340,7 @@ try:
             self.card_claude = tk.Frame(self.anti_view, bg=self.card_color, highlightbackground=self.border_color, highlightthickness=1)
             self.card_claude.pack(fill="x", pady=4)
             
-            self.lbl_cld_title = tk.Label(self.card_claude, text="Claude and GPT models", font=("Microsoft JhengHei", 9, "bold"), bg=self.card_color, fg=self.txt_secondary)
+            self.lbl_cld_title = tk.Label(self.card_claude, text="Puti-AI Claude & GPT", font=("Microsoft JhengHei", 9, "bold"), bg=self.card_color, fg=self.txt_secondary)
             self.lbl_cld_title.pack(anchor="w", padx=12, pady=(6, 2))
             
             frame_cld_rings = tk.Frame(self.card_claude, bg=self.card_color)
@@ -366,7 +367,7 @@ try:
             self.card_op_go = tk.Frame(self.open_view, bg=self.card_color, highlightbackground=self.border_color, highlightthickness=1)
             self.card_op_go.pack(fill="x", pady=4)
             
-            self.lbl_opg_title = tk.Label(self.card_op_go, text="OpenCode Go 額度限額", font=("Microsoft JhengHei", 9, "bold"), bg=self.card_color, fg=self.txt_secondary)
+            self.lbl_opg_title = tk.Label(self.card_op_go, text="Puti-AI OpenCode Go", font=("Microsoft JhengHei", 9, "bold"), bg=self.card_color, fg=self.txt_secondary)
             self.lbl_opg_title.pack(anchor="w", padx=12, pady=(6, 2))
             
             frame_op_rings = tk.Frame(self.card_op_go, bg=self.card_color)
@@ -465,10 +466,8 @@ try:
             r = w - margin
             pen_w = max(3, int(5 * scale_factor))
             
-            # 1. 灰色背景
             canvas.create_arc(margin, margin, r, r, start=0, extent=359.9, outline="#E5E7EB", width=pen_w, style="arc")
             
-            # 2. 進度
             if percent >= 100:
                 extent_val = -359.99
             else:
@@ -476,7 +475,6 @@ try:
                 
             canvas.create_arc(margin, margin, r, r, start=90, extent=extent_val, outline=color, width=pen_w, style="arc")
             
-            # 3. 縱向黃金分割文字繪製
             num_y = int(w * 0.40)
             pct_y = int(w * 0.72)
             
@@ -516,7 +514,7 @@ try:
             self.draw_progress_ring(self.ring_gem_wk, self.gemini_wk_percent, self.accent_green, scale_factor)
             self.lbl_gem_wk_txt.configure(text=f"每週額度\n重置 {self.format_time(self.gemini_wk_seconds)}")
             
-            # Claude Models (100% 綠色滿圓)
+            # Claude Models
             self.draw_progress_ring(self.ring_cld_5h, self.claude_5h_percent, self.accent_green, scale_factor)
             self.draw_progress_ring(self.ring_cld_wk, self.claude_wk_percent, self.accent_green, scale_factor)
 
