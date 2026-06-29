@@ -37,7 +37,7 @@
 
 ### 1. 複製本專案到本地
 ```bash
-git clone https://github.com/puti001/antigravity-opencode-usage-dashboard.git
+git clone https://github.com/puti001/Puti-AI-antigravity-opencode-usage-dashboard.git
 cd antigravity-opencode-usage-dashboard
 ```
 
