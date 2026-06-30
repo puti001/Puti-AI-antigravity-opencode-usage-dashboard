@@ -103,33 +103,58 @@ try:
         if not port or not csrf:
             return None
 
-        data = grpc_call(port, csrf, "GetUserStatus")
-        status = data.get("userStatus", {})
+        # 1. 呼叫 GetUserStatus 取得 Credits 點數
+        status_data = {}
+        try:
+            status_data = grpc_call(port, csrf, "GetUserStatus")
+        except Exception:
+            pass
+
+        # 2. 呼叫 RetrieveUserQuotaSummary 取得真實 5H / Weekly Quotas
+        summary_data = {}
+        try:
+            summary_data = grpc_call(port, csrf, "RetrieveUserQuotaSummary")
+        except Exception:
+            pass
+
+        status = status_data.get("userStatus", {})
         plan_status = status.get("planStatus", {})
         plan = plan_status.get("planInfo", {})
-        configs = status.get("cascadeModelConfigData", {}).get("clientModelConfigs", [])
 
-        gemini_remaining = None
-        gemini_reset = None
-        claude_remaining = None
-        claude_reset = None
+        gemini_5h_rem = 1.0
+        gemini_5h_reset = None
+        gemini_wk_rem = 1.0
+        gemini_wk_reset = None
+
+        claude_5h_rem = 1.0
+        claude_5h_reset = None
+        claude_wk_rem = 1.0
+        claude_wk_reset = None
+        
         now_utc = datetime.now(timezone.utc)
 
-        for cfg in configs:
-            label = cfg.get("label", "").lower()
-            qi = cfg.get("quotaInfo", {})
-            remaining = qi.get("remainingFraction")
-            reset_str = qi.get("resetTime")
+        groups = summary_data.get("response", {}).get("groups", [])
+        for group in groups:
+            g_name = group.get("displayName", "").lower()
+            for bucket in group.get("buckets", []):
+                bid = bucket.get("bucketId", "").lower()
+                rem = bucket.get("remainingFraction", 1.0)
+                reset_t = bucket.get("resetTime", "")
 
-            is_gemini = "gemini" in label
-            is_claude = "claude" in label or "gpt" in label or "opus" in label
-
-            if is_gemini and gemini_remaining is None and remaining is not None:
-                gemini_remaining = remaining
-                gemini_reset = reset_str
-            elif is_claude and claude_remaining is None and remaining is not None:
-                claude_remaining = remaining
-                claude_reset = reset_str
+                if "gemini" in g_name or "gemini" in bid:
+                    if "5h" in bid:
+                        gemini_5h_rem = rem
+                        gemini_5h_reset = reset_t
+                    elif "weekly" in bid:
+                        gemini_wk_rem = rem
+                        gemini_wk_reset = reset_t
+                elif "claude" in g_name or "3p" in bid:
+                    if "5h" in bid:
+                        claude_5h_rem = rem
+                        claude_5h_reset = reset_t
+                    elif "weekly" in bid:
+                        claude_wk_rem = rem
+                        claude_wk_reset = reset_t
 
         def parse_reset_secs(reset_str):
             if not reset_str:
@@ -141,17 +166,17 @@ try:
             except Exception:
                 return 0
 
-        if gemini_remaining is None:
-            gemini_remaining = 0.0
-
-        gemini_remaining_pct = int(gemini_remaining * 100)
-        claude_remaining_pct = int(claude_remaining * 100) if claude_remaining is not None else None
-
         return {
-            "gemini_remaining_pct": gemini_remaining_pct,
-            "gemini_reset_secs": parse_reset_secs(gemini_reset),
-            "claude_remaining_pct": claude_remaining_pct,
-            "claude_reset_secs": parse_reset_secs(claude_reset) if claude_reset else 0,
+            "gemini_5h_pct": int(gemini_5h_rem * 100),
+            "gemini_5h_reset_secs": parse_reset_secs(gemini_5h_reset),
+            "gemini_wk_pct": int(gemini_wk_rem * 100),
+            "gemini_wk_reset_secs": parse_reset_secs(gemini_wk_reset),
+
+            "claude_5h_pct": int(claude_5h_rem * 100),
+            "claude_5h_reset_secs": parse_reset_secs(claude_5h_reset),
+            "claude_wk_pct": int(claude_wk_rem * 100),
+            "claude_wk_reset_secs": parse_reset_secs(claude_wk_reset),
+
             "prompt_credits": plan.get("monthlyPromptCredits", 0),
             "flow_credits": plan.get("monthlyFlowCredits", 0),
             "available_prompt": plan_status.get("availablePromptCredits", 0),
@@ -243,7 +268,7 @@ try:
             self.root.overrideredirect(True)
             self.root.attributes("-alpha", 0.98, "-topmost", True)
             self.root.configure(bg=self.BG)
-            self.root.geometry("295x400+300+300")
+            self.root.geometry("295x440+300+300")
             make_window_rounded(self.root)
 
             # ── state ──
@@ -259,15 +284,23 @@ try:
             self._refreshing = False
 
             # Antigravity
-            self.ag_gemini_remaining = 0   # remaining % (NOT used %)
-            self.ag_gemini_secs = 0
-            self.ag_claude_remaining = None  # None = API 沒有資料
-            self.ag_claude_secs = 0
+            self.ag_gemini_5h_pct = 100
+            self.ag_gemini_5h_secs = 0
+            self.ag_gemini_wk_pct = 100
+            self.ag_gemini_wk_secs = 0
+            
+            self.ag_claude_5h_pct = 100
+            self.ag_claude_5h_secs = 0
+            self.ag_claude_wk_pct = 100
+            self.ag_claude_wk_secs = 0
+
             self.ag_error = ""
             self.ag_prompt_credits = 0
             self.ag_flow_credits = 0
-            self._ag_gemini_reset_secs_src = None
-            self._ag_claude_reset_secs_src = None
+            self._ag_gemini_5h_secs_src = None
+            self._ag_gemini_wk_secs_src = None
+            self._ag_claude_5h_secs_src = None
+            self._ag_claude_wk_secs_src = None
             self._ag_last_api_time = 0.0
 
             # OpenCode
@@ -368,24 +401,13 @@ try:
         def _build_antigravity_view(self):
             self.ag_view = tk.Frame(self.content, bg=self.BG)
 
-            card_gem = self._card(self.ag_view, "✦ Puti-AI · Gemini Models · Five Hour")
-            gem_row = tk.Frame(card_gem, bg=self.CARD)
-            gem_row.pack(fill="x", padx=10, pady=(2, 6))
-            gem_center = tk.Frame(gem_row, bg=self.CARD)
-            gem_center.pack(expand=True)
-            self.ring_gem = tk.Canvas(gem_center, bg=self.CARD, highlightthickness=0)
-            self.ring_gem.pack(pady=2)
-            self.lbl_gem = tk.Label(gem_center, text="Five Hour 剩餘", font=("Microsoft JhengHei", 7),
-                                    bg=self.CARD, fg=self.TXT_SEC)
-            self.lbl_gem.pack()
+            card_gem = self._card(self.ag_view, "✦ Puti-AI · Gemini Models")
+            self.ring_gem_5h, self.lbl_gem_5h, self.ring_gem_wk, self.lbl_gem_wk = \
+                self._ring_pair(card_gem, "5小時剩餘", "每週剩餘")
 
-            card_cld = self._card(self.ag_view, "✦ Puti-AI · Claude & GPT")
-            cld_msg = tk.Frame(card_cld, bg=self.CARD)
-            cld_msg.pack(fill="x", padx=14, pady=(6, 10))
-            self.lbl_cld = tk.Label(cld_msg, text="配額資料僅見 Antigravity App 內後台",
-                                    font=("Microsoft JhengHei", 8),
-                                    bg=self.CARD, fg=self.TXT_SEC, wraplength=240, justify="left")
-            self.lbl_cld.pack(anchor="w")
+            card_cld = self._card(self.ag_view, "✦ Puti-AI · Claude & GPT models")
+            self.ring_cld_5h, self.lbl_cld_5h, self.ring_cld_wk, self.lbl_cld_wk = \
+                self._ring_pair(card_cld, "5小時剩餘", "每週剩餘")
 
             card_credit = self._card(self.ag_view, "✦ Puti-AI · 點數餘額")
             self.lbl_prompt_credit = self._stat_row(card_credit, "💰  Prompt Credits", "-- / --")
@@ -467,20 +489,30 @@ try:
             sf = self.root.winfo_width() / 295.0
 
             # ── Antigravity Tab ──
-            self.draw_ring(self.ring_gem, self.ag_gemini_remaining, self.GREEN, sf)
-            self.lbl_gem.configure(
-                text=f"剩餘 {self.ag_gemini_remaining}%\n重置 {self.fmt_time(self.ag_gemini_secs)}",
+            # Gemini
+            self.draw_ring(self.ring_gem_5h, self.ag_gemini_5h_pct, self.GREEN, sf)
+            self.lbl_gem_5h.configure(
+                text=f"5小時剩餘 {self.ag_gemini_5h_pct}%\n重置 {self.fmt_time(self.ag_gemini_5h_secs)}",
+                font=("Microsoft JhengHei", max(1, int(7 * sf))))
+                
+            self.draw_ring(self.ring_gem_wk, self.ag_gemini_wk_pct, self.GREEN, sf)
+            self.lbl_gem_wk.configure(
+                text=f"每週剩餘 {self.ag_gemini_wk_pct}%\n重置 {self.fmt_time(self.ag_gemini_wk_secs)}",
+                font=("Microsoft JhengHei", max(1, int(7 * sf))))
+
+            # Claude
+            self.draw_ring(self.ring_cld_5h, self.ag_claude_5h_pct, self.BLUE, sf)
+            self.lbl_cld_5h.configure(
+                text=f"5小時剩餘 {self.ag_claude_5h_pct}%\n重置 {self.fmt_time(self.ag_claude_5h_secs)}",
+                font=("Microsoft JhengHei", max(1, int(7 * sf))))
+
+            self.draw_ring(self.ring_cld_wk, self.ag_claude_wk_pct, self.BLUE, sf)
+            self.lbl_cld_wk.configure(
+                text=f"每週剩餘 {self.ag_claude_wk_pct}%\n重置 {self.fmt_time(self.ag_claude_wk_secs)}",
                 font=("Microsoft JhengHei", max(1, int(7 * sf))))
 
             self.ag_err_lbl.configure(text=self.ag_error)
-            if self.ag_claude_remaining is not None:
-                self.lbl_cld.configure(
-                    text=f"Five Hour 剩餘 {self.ag_claude_remaining}%\n重置 {self.fmt_time(self.ag_claude_secs)}",
-                    font=("Microsoft JhengHei", max(1, int(8 * sf))))
-            else:
-                self.lbl_cld.configure(
-                    text="配額資料僅見 Antigravity App 內後台\nGetUserStatus API 未提供 Claude 配額",
-                    font=("Microsoft JhengHei", max(1, int(8 * sf))))
+            
             self.lbl_prompt_credit.configure(text=f"{self.ag_prompt_credits} / 50,000")
             self.lbl_flow_credit.configure(text=f"{self.ag_flow_credits} / 150,000")
 
@@ -516,14 +548,24 @@ try:
 
                     if ag:
                         def upd_ag():
-                            self.ag_gemini_remaining = ag["gemini_remaining_pct"]
-                            self.ag_gemini_secs = ag["gemini_reset_secs"]
-                            self.ag_claude_remaining = ag["claude_remaining_pct"]
-                            self.ag_claude_secs = ag["claude_reset_secs"]
+                            self.ag_gemini_5h_pct = ag["gemini_5h_pct"]
+                            self.ag_gemini_5h_secs = ag["gemini_5h_reset_secs"]
+                            self.ag_gemini_wk_pct = ag["gemini_wk_pct"]
+                            self.ag_gemini_wk_secs = ag["gemini_wk_reset_secs"]
+
+                            self.ag_claude_5h_pct = ag["claude_5h_pct"]
+                            self.ag_claude_5h_secs = ag["claude_5h_reset_secs"]
+                            self.ag_claude_wk_pct = ag["claude_wk_pct"]
+                            self.ag_claude_wk_secs = ag["claude_wk_reset_secs"]
+
                             self.ag_prompt_credits = ag.get("available_prompt", 0)
                             self.ag_flow_credits = ag.get("available_flow", 0)
-                            self._ag_gemini_reset_secs_src = ag["gemini_reset_secs"]
-                            self._ag_claude_reset_secs_src = ag["claude_reset_secs"]
+
+                            self._ag_gemini_5h_secs_src = ag["gemini_5h_reset_secs"]
+                            self._ag_gemini_wk_secs_src = ag["gemini_wk_reset_secs"]
+                            self._ag_claude_5h_secs_src = ag["claude_5h_reset_secs"]
+                            self._ag_claude_wk_secs_src = ag["claude_wk_reset_secs"]
+
                             self._ag_last_api_time = time.monotonic()
                             self.ag_error = ""
                             self.status_lbl.configure(
@@ -578,12 +620,19 @@ try:
             now = time.monotonic()
 
             # 用 real API time 計算準確倒數，而非 local decrement
-            if self._ag_gemini_reset_secs_src is not None:
+            if self._ag_gemini_5h_secs_src is not None:
                 elapsed = int(now - self._ag_last_api_time)
-                self.ag_gemini_secs = max(0, self._ag_gemini_reset_secs_src - elapsed)
-            if self._ag_claude_reset_secs_src is not None:
+                self.ag_gemini_5h_secs = max(0, self._ag_gemini_5h_secs_src - elapsed)
+            if self._ag_gemini_wk_secs_src is not None:
                 elapsed = int(now - self._ag_last_api_time)
-                self.ag_claude_secs = max(0, self._ag_claude_reset_secs_src - elapsed)
+                self.ag_gemini_wk_secs = max(0, self._ag_gemini_wk_secs_src - elapsed)
+
+            if self._ag_claude_5h_secs_src is not None:
+                elapsed = int(now - self._ag_last_api_time)
+                self.ag_claude_5h_secs = max(0, self._ag_claude_5h_secs_src - elapsed)
+            if self._ag_claude_wk_secs_src is not None:
+                elapsed = int(now - self._ag_last_api_time)
+                self.ag_claude_wk_secs = max(0, self._ag_claude_wk_secs_src - elapsed)
 
             # 定時刷新：monotonic 追蹤，漂移自癒合
             if now - self._last_refresh >= self._refresh_interval:
