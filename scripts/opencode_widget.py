@@ -13,7 +13,6 @@ def log_error(err):
 
 try:
     import tkinter as tk
-    from tkinter import simpledialog
     import sqlite3, json, subprocess, re, threading, time, socket, struct
     import urllib.request
     from datetime import datetime, timezone
@@ -46,14 +45,12 @@ try:
 
     # ─── 動態抓 Antigravity Language Server Port & CSRF ──────
     def get_antigravity_port_and_csrf():
-        """從 language_server.log 拿 HTTP port，再從頁面拿 CSRF token"""
         log_path = os.path.expanduser(
             "~\\AppData\\Roaming\\Antigravity\\logs\\language_server.log")
         http_port = None
         try:
             with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
-            # 找最後一次出現的 HTTP port
             matches = re.findall(
                 r'Language server listening on random port at (\d+) for HTTP', content)
             if matches:
@@ -64,7 +61,6 @@ try:
         if not http_port:
             return None, None
 
-        # 從頁面抓 CSRF token
         try:
             req = urllib.request.Request(
                 f"http://localhost:{http_port}/",
@@ -109,6 +105,8 @@ try:
 
         data = grpc_call(port, csrf, "GetUserStatus")
         status = data.get("userStatus", {})
+        plan_status = status.get("planStatus", {})
+        plan = plan_status.get("planInfo", {})
         configs = status.get("cascadeModelConfigData", {}).get("clientModelConfigs", [])
 
         gemini_remaining = None
@@ -122,16 +120,14 @@ try:
             qi = cfg.get("quotaInfo", {})
             remaining = qi.get("remainingFraction")
             reset_str = qi.get("resetTime")
-            if remaining is None:
-                continue
 
             is_gemini = "gemini" in label
             is_claude = "claude" in label or "gpt" in label or "opus" in label
 
-            if is_gemini and gemini_remaining is None:
+            if is_gemini and gemini_remaining is None and remaining is not None:
                 gemini_remaining = remaining
                 gemini_reset = reset_str
-            elif is_claude and claude_remaining is None:
+            elif is_claude and claude_remaining is None and remaining is not None:
                 claude_remaining = remaining
                 claude_reset = reset_str
 
@@ -145,11 +141,21 @@ try:
             except Exception:
                 return 0
 
+        if gemini_remaining is None:
+            gemini_remaining = 0.0
+
+        gemini_remaining_pct = int(gemini_remaining * 100)
+        claude_remaining_pct = int(claude_remaining * 100) if claude_remaining is not None else None
+
         return {
-            "gemini_used_pct": int((1 - (gemini_remaining or 0)) * 100),
+            "gemini_remaining_pct": gemini_remaining_pct,
             "gemini_reset_secs": parse_reset_secs(gemini_reset),
-            "claude_used_pct": int((1 - (claude_remaining or 0)) * 100),
-            "claude_reset_secs": parse_reset_secs(claude_reset),
+            "claude_remaining_pct": claude_remaining_pct,
+            "claude_reset_secs": parse_reset_secs(claude_reset) if claude_reset else 0,
+            "prompt_credits": plan.get("monthlyPromptCredits", 0),
+            "flow_credits": plan.get("monthlyFlowCredits", 0),
+            "available_prompt": plan_status.get("availablePromptCredits", 0),
+            "available_flow": plan_status.get("availableFlowCredits", 0),
         }
 
     # ─── 抓 OpenCode SQLite 真實 Token ──────────────────────
@@ -237,7 +243,7 @@ try:
             self.root.overrideredirect(True)
             self.root.attributes("-alpha", 0.98, "-topmost", True)
             self.root.configure(bg=self.BG)
-            self.root.geometry("295x430+300+300")
+            self.root.geometry("295x400+300+300")
             make_window_rounded(self.root)
 
             # ── state ──
@@ -248,12 +254,21 @@ try:
             self.drag_active = False
             self.EDGE = 8
 
+            self._last_refresh = 0.0
+            self._refresh_interval = 60
+            self._refreshing = False
+
             # Antigravity
-            self.ag_gemini_pct = 0
+            self.ag_gemini_remaining = 0   # remaining % (NOT used %)
             self.ag_gemini_secs = 0
-            self.ag_claude_pct = 0
+            self.ag_claude_remaining = None  # None = API 沒有資料
             self.ag_claude_secs = 0
             self.ag_error = ""
+            self.ag_prompt_credits = 0
+            self.ag_flow_credits = 0
+            self._ag_gemini_reset_secs_src = None
+            self._ag_claude_reset_secs_src = None
+            self._ag_last_api_time = 0.0
 
             # OpenCode
             self.oc_tok_5h = 0
@@ -263,10 +278,6 @@ try:
             self.oc_sessions = "--"
             self.oc_messages = "--"
             self.oc_cost = "--"
-
-            # Limits (可雙擊調整)
-            self.cap_5h = 5_000_000
-            self.cap_7d = 50_000_000
 
             self.menu = tk.Menu(self.root, tearoff=0, bg=self.CARD, fg=self.TXT_PRI)
             self.menu.add_command(label="Refresh", command=self.manual_refresh)
@@ -284,19 +295,18 @@ try:
 
         # ─── UI ──────────────────────────────────────────────
         def create_ui(self):
-            # Nav
             nav = tk.Frame(self.root, bg=self.BG)
             nav.pack(fill="x", padx=12, pady=(12, 4))
 
             tabs = tk.Frame(nav, bg=self.BG)
             tabs.pack(side="left")
             self.tab_ag = tk.Label(tabs, text="Antigravity", font=("Microsoft JhengHei", 9, "bold"),
-                                   bg=self.TAB_ON, fg=self.TXT_PRI, padx=12, pady=4, cursor="hand2")
+                                    bg=self.TAB_ON, fg=self.TXT_PRI, padx=12, pady=4, cursor="hand2")
             self.tab_ag.pack(side="left")
             self.tab_ag.bind("<Button-1>", lambda e: self.switch_tab("antigravity"))
 
             self.tab_oc = tk.Label(tabs, text="OpenCode", font=("Microsoft JhengHei", 9, "bold"),
-                                   bg=self.TAB_OFF, fg=self.TXT_SEC, padx=12, pady=4, cursor="hand2")
+                                    bg=self.TAB_OFF, fg=self.TXT_SEC, padx=12, pady=4, cursor="hand2")
             self.tab_oc.pack(side="left", padx=(4, 0))
             self.tab_oc.bind("<Button-1>", lambda e: self.switch_tab("opencode"))
 
@@ -310,7 +320,6 @@ try:
             close_btn.pack(side="left")
             close_btn.bind("<Button-1>", lambda e: self.root.destroy())
 
-            # Content
             self.content = tk.Frame(self.root, bg=self.BG)
             self.content.pack(fill="both", expand=True, padx=12, pady=4)
 
@@ -318,11 +327,10 @@ try:
             self._build_opencode_view()
             self.show_view()
 
-            # Status bar
             bot = tk.Frame(self.root, bg=self.BG)
             bot.pack(side="bottom", fill="x")
             self.status_lbl = tk.Label(bot, text="啟動中...", font=("Microsoft JhengHei", 8),
-                                       bg=self.BG, fg=self.TXT_SEC)
+                                        bg=self.BG, fg=self.TXT_SEC)
             self.status_lbl.pack(side="left", padx=14, pady=2)
 
         def _card(self, parent, title):
@@ -349,53 +357,6 @@ try:
 
             return lc, ll, rc, rl
 
-        def _build_antigravity_view(self):
-            self.ag_view = tk.Frame(self.content, bg=self.BG)
-
-            card_gem = self._card(self.ag_view, "✦ Puti-AI · Gemini Models")
-            self.ring_gem_5h, self.lbl_gem_5h, self.ring_gem_wk, self.lbl_gem_wk = \
-                self._ring_pair(card_gem, "5 小時額度", "每週額度")
-
-            card_cld = self._card(self.ag_view, "✦ Puti-AI · Claude & GPT")
-            self.ring_cld_5h, self.lbl_cld_5h, self.ring_cld_wk, self.lbl_cld_wk = \
-                self._ring_pair(card_cld, "5 小時額度", "每週額度")
-
-            self.ag_err_lbl = tk.Label(self.ag_view, text="", font=("Microsoft JhengHei", 8),
-                                       bg=self.BG, fg=self.ORANGE, wraplength=260, justify="left")
-            self.ag_err_lbl.pack(anchor="w", padx=4)
-
-        def _build_opencode_view(self):
-            self.oc_view = tk.Frame(self.content, bg=self.BG)
-
-            card_tok = self._card(self.oc_view, "✦ Puti-AI · OpenCode Token 用量")
-            tok_row = tk.Frame(card_tok, bg=self.CARD)
-            tok_row.pack(fill="x", padx=6, pady=(2, 6))
-
-            self.frame_5h = tk.Frame(tok_row, bg=self.CARD); self.frame_5h.pack(side="left", expand=True, fill="both")
-            self.ring_5h = tk.Canvas(self.frame_5h, bg=self.CARD, highlightthickness=0); self.ring_5h.pack(pady=2)
-            self.lbl_5h = tk.Label(self.frame_5h, text="近 5 小時", font=("Microsoft JhengHei", 7),
-                                   bg=self.CARD, fg=self.TXT_SEC); self.lbl_5h.pack()
-
-            self.frame_7d = tk.Frame(tok_row, bg=self.CARD); self.frame_7d.pack(side="left", expand=True, fill="both")
-            self.ring_7d = tk.Canvas(self.frame_7d, bg=self.CARD, highlightthickness=0); self.ring_7d.pack(pady=2)
-            self.lbl_7d = tk.Label(self.frame_7d, text="近 7 天", font=("Microsoft JhengHei", 7),
-                                   bg=self.CARD, fg=self.TXT_SEC); self.lbl_7d.pack()
-
-            self.frame_mo = tk.Frame(tok_row, bg=self.CARD); self.frame_mo.pack(side="left", expand=True, fill="both")
-            self.ring_mo = tk.Canvas(self.frame_mo, bg=self.CARD, highlightthickness=0); self.ring_mo.pack(pady=2)
-            self.lbl_mo = tk.Label(self.frame_mo, text="近 30 天", font=("Microsoft JhengHei", 7),
-                                   bg=self.CARD, fg=self.TXT_SEC); self.lbl_mo.pack()
-
-            card_stat = self._card(self.oc_view, "✦ Puti-AI · Session 統計")
-            self.lbl_ses = self._stat_row(card_stat, "🗂  Sessions / Messages", "-- / --")
-            self.lbl_cost = self._stat_row(card_stat, "💰  Total Cost", "$--")
-
-            card_model = self._card(self.oc_view, "✦ Top Models (30天)")
-            self.model_text = tk.Label(card_model, text="載入中...",
-                                       font=("Consolas", 8), bg=self.CARD, fg=self.TXT_SEC,
-                                       justify="left", anchor="w")
-            self.model_text.pack(anchor="w", padx=12, pady=(0, 8))
-
         def _stat_row(self, parent, label, val):
             f = tk.Frame(parent, bg=self.CARD); f.pack(fill="x", padx=14, pady=2)
             tk.Label(f, text=label, font=("Microsoft JhengHei", 9),
@@ -403,6 +364,54 @@ try:
             v = tk.Label(f, text=val, font=("Consolas", 9, "bold"),
                          bg=self.CARD, fg=self.TXT_PRI); v.pack(side="right")
             return v
+
+        def _build_antigravity_view(self):
+            self.ag_view = tk.Frame(self.content, bg=self.BG)
+
+            card_gem = self._card(self.ag_view, "✦ Puti-AI · Gemini Models · Five Hour")
+            gem_row = tk.Frame(card_gem, bg=self.CARD)
+            gem_row.pack(fill="x", padx=10, pady=(2, 6))
+            gem_center = tk.Frame(gem_row, bg=self.CARD)
+            gem_center.pack(expand=True)
+            self.ring_gem = tk.Canvas(gem_center, bg=self.CARD, highlightthickness=0)
+            self.ring_gem.pack(pady=2)
+            self.lbl_gem = tk.Label(gem_center, text="Five Hour 剩餘", font=("Microsoft JhengHei", 7),
+                                    bg=self.CARD, fg=self.TXT_SEC)
+            self.lbl_gem.pack()
+
+            card_cld = self._card(self.ag_view, "✦ Puti-AI · Claude & GPT")
+            cld_msg = tk.Frame(card_cld, bg=self.CARD)
+            cld_msg.pack(fill="x", padx=14, pady=(6, 10))
+            self.lbl_cld = tk.Label(cld_msg, text="配額資料僅見 Antigravity App 內後台",
+                                    font=("Microsoft JhengHei", 8),
+                                    bg=self.CARD, fg=self.TXT_SEC, wraplength=240, justify="left")
+            self.lbl_cld.pack(anchor="w")
+
+            card_credit = self._card(self.ag_view, "✦ Puti-AI · 點數餘額")
+            self.lbl_prompt_credit = self._stat_row(card_credit, "💰  Prompt Credits", "-- / --")
+            self.lbl_flow_credit = self._stat_row(card_credit, "🌊  Flow Credits", "-- / --")
+
+            self.ag_err_lbl = tk.Label(self.ag_view, text="", font=("Microsoft JhengHei", 8),
+                                        bg=self.BG, fg=self.ORANGE, wraplength=260, justify="left")
+            self.ag_err_lbl.pack(anchor="w", padx=4)
+
+        def _build_opencode_view(self):
+            self.oc_view = tk.Frame(self.content, bg=self.BG)
+
+            card_tok = self._card(self.oc_view, "✦ Puti-AI · OpenCode Token 用量")
+            self.lbl_tok_5h = self._stat_row(card_tok, "🕐  近 5 小時", "-- tok")
+            self.lbl_tok_7d = self._stat_row(card_tok, "📅  近 7 天", "-- tok")
+            self.lbl_tok_30d = self._stat_row(card_tok, "📆  近 30 天", "-- tok")
+
+            card_stat = self._card(self.oc_view, "✦ Puti-AI · Session 統計")
+            self.lbl_ses = self._stat_row(card_stat, "Sessions / Messages", "S: -- / M: --")
+            self.lbl_cost = self._stat_row(card_stat, "Total Cost", "$--")
+
+            card_model = self._card(self.oc_view, "✦ Top Models (30天)")
+            self.model_text = tk.Label(card_model, text="載入中...",
+                                       font=("Consolas", 8), bg=self.CARD, fg=self.TXT_SEC,
+                                       justify="left", anchor="w")
+            self.model_text.pack(anchor="w", padx=12, pady=(0, 8))
 
         # ─── View switching ───────────────────────────────────
         def show_view(self):
@@ -432,7 +441,7 @@ try:
             canvas.create_arc(m, m, r, r, start=0, extent=359.9,
                               outline="#E5E7EB", width=pw, style="arc")
             ext = -359.99 if pct >= 100 else -3.6 * pct
-            ring_color = self.ORANGE if pct >= 85 else color
+            ring_color = self.ORANGE if pct <= 10 else (self.BLUE if pct <= 25 else color)
             canvas.create_arc(m, m, r, r, start=90, extent=ext,
                               outline=ring_color, width=pw, style="arc")
             fs_num = max(1, int(16 * scale)); fs_pct = max(1, int(8 * scale))
@@ -458,52 +467,33 @@ try:
             sf = self.root.winfo_width() / 295.0
 
             # ── Antigravity Tab ──
-            self.draw_ring(self.ring_gem_5h, self.ag_gemini_pct, self.GREEN, sf)
-            self.lbl_gem_5h.configure(
-                text=f"5H | 已用 {self.ag_gemini_pct}%\n重置 {self.fmt_time(self.ag_gemini_secs)}",
-                font=("Microsoft JhengHei", max(1, int(7 * sf))))
-
-            self.draw_ring(self.ring_gem_wk, self.ag_gemini_pct, self.GREEN, sf)
-            self.lbl_gem_wk.configure(
-                text=f"Wk | 已用 {self.ag_gemini_pct}%\n重置 {self.fmt_time(self.ag_gemini_secs)}",
-                font=("Microsoft JhengHei", max(1, int(7 * sf))))
-
-            self.draw_ring(self.ring_cld_5h, self.ag_claude_pct, self.BLUE, sf)
-            self.lbl_cld_5h.configure(
-                text=f"5H | 已用 {self.ag_claude_pct}%\n重置 {self.fmt_time(self.ag_claude_secs)}",
-                font=("Microsoft JhengHei", max(1, int(7 * sf))))
-
-            self.draw_ring(self.ring_cld_wk, self.ag_claude_pct, self.BLUE, sf)
-            self.lbl_cld_wk.configure(
-                text=f"Wk | 已用 {self.ag_claude_pct}%\n重置 {self.fmt_time(self.ag_claude_secs)}",
+            self.draw_ring(self.ring_gem, self.ag_gemini_remaining, self.GREEN, sf)
+            self.lbl_gem.configure(
+                text=f"剩餘 {self.ag_gemini_remaining}%\n重置 {self.fmt_time(self.ag_gemini_secs)}",
                 font=("Microsoft JhengHei", max(1, int(7 * sf))))
 
             self.ag_err_lbl.configure(text=self.ag_error)
+            if self.ag_claude_remaining is not None:
+                self.lbl_cld.configure(
+                    text=f"Five Hour 剩餘 {self.ag_claude_remaining}%\n重置 {self.fmt_time(self.ag_claude_secs)}",
+                    font=("Microsoft JhengHei", max(1, int(8 * sf))))
+            else:
+                self.lbl_cld.configure(
+                    text="配額資料僅見 Antigravity App 內後台\nGetUserStatus API 未提供 Claude 配額",
+                    font=("Microsoft JhengHei", max(1, int(8 * sf))))
+            self.lbl_prompt_credit.configure(text=f"{self.ag_prompt_credits} / 50,000")
+            self.lbl_flow_credit.configure(text=f"{self.ag_flow_credits} / 150,000")
 
             # ── OpenCode Tab ──
-            pct_5h = min(100, int(self.oc_tok_5h / self.cap_5h * 100)) if self.cap_5h else 0
-            pct_7d = min(100, int(self.oc_tok_7d / self.cap_7d * 100)) if self.cap_7d else 0
+            self.lbl_tok_5h.configure(text=f"{self.fmt_k(self.oc_tok_5h)} tok")
+            self.lbl_tok_7d.configure(text=f"{self.fmt_k(self.oc_tok_7d)} tok")
+            self.lbl_tok_30d.configure(text=f"{self.fmt_k(self.oc_tok_30d)} tok")
 
-            self.draw_ring(self.ring_5h, pct_5h, self.BLUE, sf)
-            self.lbl_5h.configure(text=f"近 5H\n{self.fmt_k(self.oc_tok_5h)} tok",
-                                  font=("Microsoft JhengHei", max(1, int(7 * sf))))
-
-            self.draw_ring(self.ring_7d, pct_7d, self.BLUE, sf)
-            self.lbl_7d.configure(text=f"近 7天\n{self.fmt_k(self.oc_tok_7d)} tok",
-                                  font=("Microsoft JhengHei", max(1, int(7 * sf))))
-
-            # 30天圓環：相對 7天的比例
-            pct_mo = 100 if self.oc_tok_30d > 0 else 0
-            self.draw_ring(self.ring_mo, pct_mo, self.GREEN, sf)
-            self.lbl_mo.configure(text=f"近 30天\n{self.fmt_k(self.oc_tok_30d)} tok",
-                                  font=("Microsoft JhengHei", max(1, int(7 * sf))))
-
-            self.lbl_ses.configure(text=f"{self.oc_sessions} 會話 / {self.oc_messages} 訊息",
+            self.lbl_ses.configure(text=f"S: {self.oc_sessions} / M: {self.oc_messages}",
                                    font=("Consolas", max(1, int(9 * sf)), "bold"))
             self.lbl_cost.configure(text=f"${self.oc_cost}",
                                     font=("Consolas", max(1, int(9 * sf)), "bold"))
 
-            # Top models
             if self.oc_model_breakdown:
                 top = sorted(self.oc_model_breakdown.items(), key=lambda x: -x[1])[:5]
                 lines = [f"{self.fmt_k(v):>6}  {k}" for k, v in top]
@@ -511,29 +501,42 @@ try:
 
         # ─── Data refresh ─────────────────────────────────────
         def refresh_data(self):
+            if self._refreshing:
+                return
+            self._refreshing = True
+
             def task():
-                # Antigravity
                 try:
-                    ag = get_antigravity_quota()
+                    ag = None
+                    for attempt in range(2):
+                        ag = get_antigravity_quota()
+                        if ag is not None:
+                            break
+                        time.sleep(0.5)
+
                     if ag:
                         def upd_ag():
-                            self.ag_gemini_pct = ag["gemini_used_pct"]
+                            self.ag_gemini_remaining = ag["gemini_remaining_pct"]
                             self.ag_gemini_secs = ag["gemini_reset_secs"]
-                            self.ag_claude_pct = ag["claude_used_pct"]
+                            self.ag_claude_remaining = ag["claude_remaining_pct"]
                             self.ag_claude_secs = ag["claude_reset_secs"]
+                            self.ag_prompt_credits = ag.get("available_prompt", 0)
+                            self.ag_flow_credits = ag.get("available_flow", 0)
+                            self._ag_gemini_reset_secs_src = ag["gemini_reset_secs"]
+                            self._ag_claude_reset_secs_src = ag["claude_reset_secs"]
+                            self._ag_last_api_time = time.monotonic()
                             self.ag_error = ""
                             self.status_lbl.configure(
-                                text=f"更新 {time.strftime('%H:%M:%S')} · 真實 API 監控")
+                                text=f"更新 {time.strftime('%H:%M:%S')} · 即時 API 監控")
                             self.refresh_ui()
                         self.root.after(0, upd_ag)
                     else:
                         self.root.after(0, lambda: self.ag_err_lbl.configure(
-                            text="⚠ Antigravity Language Server 未偵測到，請確認 App 已開啟"))
+                            text="⚠ Antigravity Language Server 未偵測到（2次重試失敗），請確認 App 已開啟"))
                 except Exception as e:
                     self.root.after(0, lambda err=e: self.ag_err_lbl.configure(
                         text=f"⚠ API 錯誤: {str(err)[:80]}"))
 
-                # OpenCode SQLite
                 try:
                     db = get_opencode_db_stats()
                     if db:
@@ -547,7 +550,6 @@ try:
                 except Exception:
                     pass
 
-                # OpenCode CLI
                 try:
                     cli = get_opencode_cli_stats()
                     def upd_cli():
@@ -559,6 +561,10 @@ try:
                 except Exception:
                     pass
 
+                def done():
+                    self._refreshing = False
+                self.root.after(0, done)
+
             threading.Thread(target=task, daemon=True).start()
 
         def manual_refresh(self):
@@ -567,12 +573,21 @@ try:
             self.refresh_data()
             self.root.after(800, lambda: self.refresh_lbl.configure(fg=self.TXT_SEC))
 
-        # ─── Tick (每秒倒數 + 每 60 秒自動刷新) ──────────────
+        # ─── Tick (每秒倒數 + 每 N 秒自動刷新) ──────────────
         def tick(self):
-            if self.ag_gemini_secs > 0: self.ag_gemini_secs -= 1
-            if self.ag_claude_secs > 0: self.ag_claude_secs -= 1
+            now = time.monotonic()
 
-            if int(time.time()) % 60 == 0:
+            # 用 real API time 計算準確倒數，而非 local decrement
+            if self._ag_gemini_reset_secs_src is not None:
+                elapsed = int(now - self._ag_last_api_time)
+                self.ag_gemini_secs = max(0, self._ag_gemini_reset_secs_src - elapsed)
+            if self._ag_claude_reset_secs_src is not None:
+                elapsed = int(now - self._ag_last_api_time)
+                self.ag_claude_secs = max(0, self._ag_claude_reset_secs_src - elapsed)
+
+            # 定時刷新：monotonic 追蹤，漂移自癒合
+            if now - self._last_refresh >= self._refresh_interval:
+                self._last_refresh = now
                 self.refresh_data()
 
             self.refresh_ui()
@@ -625,7 +640,7 @@ try:
             if self.resize_active:
                 dx = e.x_root - self.sx; dy = e.y_root - self.sy
                 nw, nh, nx, ny = self.sw, self.sh, self.spx, self.spy
-                MIN = 260, 320
+                MIN = 260, 340
                 if "e" in self.edge_mode: nw = max(MIN[0], self.sw + dx)
                 elif "w" in self.edge_mode:
                     if self.sw - dx >= MIN[0]: nw = self.sw - dx; nx = self.spx + dx
