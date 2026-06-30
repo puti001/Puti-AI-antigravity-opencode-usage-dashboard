@@ -85,10 +85,8 @@ try:
     class FloatingDashboard:
         def __init__(self, root):
             self.root = root
-            # 融入品牌 IP 識別：Puti-AI
             self.root.title("Puti-AI Antigravity Stats")
             
-            # 無邊框、半透明、最上層
             self.root.overrideredirect(True)
             self.root.attributes("-alpha", 0.98)
             self.root.attributes("-topmost", True)
@@ -113,17 +111,18 @@ try:
             
             make_window_rounded(self.root)
             
+            # 右鍵選單
             self.menu = tk.Menu(self.root, tearoff=0, bg=self.card_color, fg=self.txt_primary)
             self.menu.add_command(label="設定初始額度 (Set Limits)", command=self.set_limits_dialog)
             self.menu.add_command(label="重新整理 (Refresh)", command=self.refresh_data)
             self.menu.add_command(label="隱藏/關閉 (Exit)", command=self.root.destroy)
             self.root.bind("<Button-3>", self.show_menu)
             
-            # --- 數據 Baseline ---
+            # --- 數據 Baseline (完美同步你最新的截圖數字) ---
             self.gemini_5h_percent = 63
-            self.gemini_5h_seconds = 3 * 3600 + 58 * 60
+            self.gemini_5h_seconds = 3 * 3600 + 58 * 60  # 3小時58分
             self.gemini_wk_percent = 74
-            self.gemini_wk_seconds = 3 * 24 * 3600 + 23 * 3600
+            self.gemini_wk_seconds = 3 * 24 * 3600 + 23 * 3600  # 3天23小時
             
             self.claude_5h_percent = 100
             self.claude_wk_percent = 100
@@ -154,6 +153,7 @@ try:
             self.refresh_data()
             
             self.bind_events_recursive(self.root)
+            self.bind_double_clicks() # 綁定雙擊極速編輯事件
             
             self.running = True
             self.socket_thread = threading.Thread(target=self.listen_socket, daemon=True)
@@ -170,6 +170,40 @@ try:
                 widget.bind("<ButtonRelease-1>", self.on_release, add="+")
             for child in widget.winfo_children():
                 self.bind_events_recursive(child)
+
+        def bind_double_clicks(self):
+            # 讓使用者直接在進度圈上「雙擊左鍵」就能立刻編輯該額度百分比，極速便利！
+            self.ring_gem_5h.bind("<Double-1>", lambda e: self.edit_single_limit("gemini_5h"))
+            self.ring_gem_wk.bind("<Double-1>", lambda e: self.edit_single_limit("gemini_wk"))
+            self.ring_op_mo.bind("<Double-1>", lambda e: self.edit_single_limit("opencode_mo"))
+
+        def edit_single_limit(self, limit_type):
+            title_map = {
+                "gemini_5h": "Gemini 5小時額度 (%)",
+                "gemini_wk": "Gemini 每週額度 (%)",
+                "opencode_mo": "OpenCode 每月使用量 (%)"
+            }
+            curr_val = {
+                "gemini_5h": self.gemini_5h_percent,
+                "gemini_wk": self.gemini_wk_percent,
+                "opencode_mo": self.opencode_mo_percent
+            }[limit_type]
+            
+            val = simpledialog.askinteger(
+                "極速設定額度", 
+                f"請輸入最新的 {title_map[limit_type]}：", 
+                initialvalue=curr_val, 
+                minvalue=0, maxvalue=100, 
+                parent=self.root
+            )
+            if val is not None:
+                if limit_type == "gemini_5h":
+                    self.gemini_5h_percent = val
+                elif limit_type == "gemini_wk":
+                    self.gemini_wk_percent = val
+                elif limit_type == "opencode_mo":
+                    self.opencode_mo_percent = val
+                self.refresh_ui()
 
         def detect_edge(self, event):
             if self.resize_active or self.drag_active:
