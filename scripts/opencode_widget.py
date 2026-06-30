@@ -17,17 +17,35 @@ try:
     import urllib.request
     from datetime import datetime, timezone
 
-    PORT_SINGLETON = 18787
+    PID_FILE = os.path.join(os.path.expanduser("~"), ".puti_ai_widget.pid")
 
-    # ─── 單例 ───────────────────────────────────────────────
+    # ─── 單例 (PID 檔案鎖機制) ──────────────────────────────────
     def check_single_instance():
+        if os.path.exists(PID_FILE):
+            try:
+                with open(PID_FILE, "r", encoding="utf-8") as f:
+                    old_pid = int(f.read().strip())
+                try:
+                    # 測試進程是否還活著
+                    os.kill(old_pid, 0)
+                    # 活著就強制殺掉它 (實現 Toggle 關閉舊面板)
+                    os.kill(old_pid, 9)
+                    try:
+                        os.remove(PID_FILE)
+                    except:
+                        pass
+                    # 自己也結束
+                    sys.exit(0)
+                except OSError:
+                    # 舊進程已不存在，正常繼續
+                    pass
+            except Exception:
+                pass
+        
+        # 寫入自己的 PID
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.5)
-            s.connect(('127.0.0.1', PORT_SINGLETON))
-            s.sendall(b'TOGGLE')
-            s.close()
-            sys.exit(0)
+            with open(PID_FILE, "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
         except Exception:
             pass
 
@@ -314,14 +332,13 @@ try:
 
             self.menu = tk.Menu(self.root, tearoff=0, bg=self.CARD, fg=self.TXT_PRI)
             self.menu.add_command(label="Refresh", command=self.manual_refresh)
-            self.menu.add_command(label="Exit", command=self.root.destroy)
+            self.menu.add_command(label="Exit", command=self.on_close)
             self.root.bind("<Button-3>", lambda e: self.menu.post(e.x_root, e.y_root))
+
+            self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
             self.create_ui()
             self.bind_all_events()
-
-            self.socket_thread = threading.Thread(target=self.listen_socket, daemon=True)
-            self.socket_thread.start()
 
             self.refresh_data()
             self.tick()
@@ -351,7 +368,7 @@ try:
             self.refresh_lbl.bind("<Button-1>", lambda e: self.manual_refresh())
             close_btn = tk.Label(btns, text="×", font=("Arial", 16), bg=self.BG, fg=self.TXT_SEC, cursor="hand2")
             close_btn.pack(side="left")
-            close_btn.bind("<Button-1>", lambda e: self.root.destroy())
+            close_btn.bind("<Button-1>", lambda e: self.on_close())
 
             self.content = tk.Frame(self.root, bg=self.BG)
             self.content.pack(fill="both", expand=True, padx=12, pady=4)
@@ -705,21 +722,14 @@ try:
             self.resize_active = False; self.drag_active = False
             self.detect_edge(e)
 
-        # ─── Socket listener ─────────────────────────────────
-        def listen_socket(self):
-            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            srv.bind(('127.0.0.1', PORT_SINGLETON))
-            srv.listen(1)
-            while self.running:
-                try:
-                    conn, _ = srv.accept()
-                    if conn.recv(1024) == b'TOGGLE':
-                        self.running = False
-                        self.root.after(0, self.root.destroy)
-                        break
-                    conn.close()
-                except Exception:
-                    break
+        def on_close(self):
+            try:
+                if os.path.exists(PID_FILE):
+                    os.remove(PID_FILE)
+            except:
+                pass
+            self.running = False
+            self.root.destroy()
 
     root = tk.Tk()
     app = FloatingDashboard(root)
