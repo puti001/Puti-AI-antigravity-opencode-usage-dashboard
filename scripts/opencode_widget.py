@@ -205,6 +205,8 @@ try:
             self.gemini_wk_percent = 0
             self.claude_5h_percent = 0
             self.claude_wk_percent = 0
+            self.opencode_5h_percent = 0
+            self.opencode_wk_percent = 0
             self.opencode_mo_percent = 0
             
             # 倒數計時秒數
@@ -212,6 +214,9 @@ try:
             self.gemini_wk_seconds = 3 * 24 * 3600 + 23 * 3600
             self.claude_5h_seconds = 4 * 3600 + 59 * 60
             self.claude_wk_seconds = 6 * 24 * 3600
+            
+            self.opencode_5h_seconds = 4 * 3600 + 59 * 60
+            self.opencode_wk_seconds = 6 * 24 * 3600
             self.opencode_mo_seconds = 8 * 24 * 3600 + 20 * 3600
             
             self.local_sessions = "--"
