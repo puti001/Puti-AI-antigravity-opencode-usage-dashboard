@@ -6,7 +6,9 @@ import ctypes
 
 def log_error(err):
     try:
-        with open(r"C:\Users\clong\widget_error.log", "w", encoding="utf-8") as f:
+        home = os.path.expanduser("~")
+        log_path = os.path.join(home, "widget_error.log")
+        with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"Error occurred at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"Message: {str(err)}\n\n")
             traceback.print_exc(file=f)
@@ -56,12 +58,14 @@ try:
         except Exception:
             pass
 
-    # 唯讀模式查詢本地 SQLite 資料庫
+    # 唯讀模式查詢本地 SQLite 資料庫 (動態路徑適應任何使用者電腦)
     def get_db_stats():
-        db_path = r"C:\Users\clong\.local\share\opencode\opencode.db"
+        home = os.path.expanduser("~")
+        db_path = os.path.join(home, ".local", "share", "opencode", "opencode.db")
         if not os.path.exists(db_path):
             return None
         try:
+            # 使用 URI / mode=ro 唯讀模式，避免 SQLite 鎖定衝突
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             cursor = conn.cursor()
             
@@ -152,17 +156,15 @@ try:
             self.menu.add_command(label="隱藏/關閉 (Exit)", command=self.root.destroy)
             self.root.bind("<Button-3>", self.show_menu)
             
-            # --- 數據 Limits Caps 上限值 (透過這個上限與本地 DB 對話數計算百分比) ---
-            self.cap_gemini_5h = 16  # 5小時訊息上限，剛好對應 10次 / 16 = 63%
-            self.cap_gemini_wk = 468  # 每週訊息上限，剛好對應 346次 / 468 = 74%
-            self.cap_opencode_mo = 800  # 每月訊息上限，對應 368次 / 800 = 46%
+            # --- 數據 Limits Caps 上限值 ---
+            self.cap_gemini_5h = 16
+            self.cap_gemini_wk = 468
+            self.cap_opencode_mo = 800
             
-            # 實時百分比
             self.gemini_5h_percent = 63
             self.gemini_wk_percent = 74
             self.opencode_mo_percent = 46
             
-            # 倒數計時秒數
             self.gemini_5h_seconds = 3 * 3600 + 58 * 60
             self.gemini_wk_seconds = 3 * 24 * 3600 + 23 * 3600
             self.claude_5h_percent = 100
