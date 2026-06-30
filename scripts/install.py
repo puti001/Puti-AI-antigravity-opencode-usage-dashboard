@@ -33,15 +33,9 @@ def install():
         # 品牌 IP 識別前綴
         bat_path = os.path.join(target_desktop, "Puti-AI Antigravity Stats.bat")
         
-        # 3. 寫入 bat 啟動檔 (使用本地埠進行一鍵 Toggle)
+        # 3. 寫入 bat 啟動檔 (使用 Python 腳本自帶的通訊埠 Toggle 機制)
         bat_content = f"""@echo off
-rem Find and toggle existing Puti-AI dashboard instance
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr :18787') do (
-    taskkill /f /pid %%a
-    exit /b
-)
-
-rem Start new windowed instance silently
+rem Start or toggle the dashboard instance
 start pythonw "{widget_path}"
 """
         
