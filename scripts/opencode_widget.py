@@ -28,7 +28,7 @@ try:
             s.sendall(b'TOGGLE')
             s.close()
             sys.exit(0)
-        except (ConnectionRefusedError, socket.timeout):
+        except Exception:
             pass
 
     check_single_instance()

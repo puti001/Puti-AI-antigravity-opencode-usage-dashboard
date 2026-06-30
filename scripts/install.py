@@ -33,10 +33,15 @@ def install():
         # 品牌 IP 識別前綴
         bat_path = os.path.join(target_desktop, "Puti-AI Antigravity Stats.bat")
         
-        # 3. 寫入 bat 啟動檔 (使用 Python 腳本自帶的通訊埠 Toggle 機制)
+        # 3. 取得當前 Python 對應的 pythonw.exe 絕對路徑
+        pythonw_path = sys.executable.replace("python.exe", "pythonw.exe")
+        if not os.path.exists(pythonw_path):
+            pythonw_path = "pythonw"
+
+        # 4. 寫入 bat 啟動檔 (使用 Python 腳本自帶的通訊埠 Toggle 機制)
         bat_content = f"""@echo off
 rem Start or toggle the dashboard instance
-start pythonw "{widget_path}"
+start "" "{pythonw_path}" "{widget_path}"
 """
         
         with open(bat_path, "w", encoding="utf-8") as f:
