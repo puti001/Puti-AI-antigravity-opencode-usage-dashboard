@@ -58,14 +58,13 @@ try:
         except Exception:
             pass
 
-    # 唯讀模式查詢本地 SQLite 資料庫 (動態路徑適應任何使用者電腦)
+    # 唯讀模式查詢本地 SQLite 資料庫 (動態統計真實消耗的 Tokens)
     def get_db_stats():
         home = os.path.expanduser("~")
         db_path = os.path.join(home, ".local", "share", "opencode", "opencode.db")
         if not os.path.exists(db_path):
             return None
         try:
-            # 使用 URI / mode=ro 唯讀模式，避免 SQLite 鎖定衝突
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             cursor = conn.cursor()
             
@@ -74,23 +73,54 @@ try:
             seven_days_ms = 7 * 24 * 3600 * 1000
             thirty_days_ms = 30 * 24 * 3600 * 1000
             
-            # 5小時使用者訊息數
-            cursor.execute("SELECT data FROM message WHERE time_created > ?", (now_ms - five_hours_ms,))
-            rows_5h = cursor.fetchall()
-            msg_5h = sum(1 for r in rows_5h if '"role":"user"' in r[0])
-            
-            # 7天使用者訊息數
-            cursor.execute("SELECT data FROM message WHERE time_created > ?", (now_ms - seven_days_ms,))
-            rows_7d = cursor.fetchall()
-            msg_7d = sum(1 for r in rows_7d if '"role":"user"' in r[0])
-            
-            # 30天使用者訊息數
+            # 讀取 30 天內所有的 message 記錄
             cursor.execute("SELECT data FROM message WHERE time_created > ?", (now_ms - thirty_days_ms,))
-            rows_30d = cursor.fetchall()
-            msg_30d = sum(1 for r in rows_30d if '"role":"user"' in r[0])
-            
+            rows = cursor.fetchall()
             conn.close()
-            return {"msg_5h": msg_5h, "msg_7d": msg_7d, "msg_30d": msg_30d}
+            
+            gemini_5h_tokens = 0
+            gemini_wk_tokens = 0
+            claude_5h_tokens = 0
+            claude_wk_tokens = 0
+            opencode_mo_tokens = 0
+            
+            for r in rows:
+                try:
+                    js = json.loads(r[0])
+                    prov = js.get("providerID", "")
+                    model = js.get("modelID", "").lower()
+                    tokens_total = js.get("tokens", {}).get("total", 0)
+                    t_created = js.get("time", {}).get("created", 0)
+                    
+                    is_gemini = (prov == "google") or ("gemini" in model)
+                    is_claude = (prov == "anthropic") or ("claude" in model) or ("gpt" in model) or ("deepseek" in model)
+                    
+                    # 5小時內
+                    if now_ms - t_created < five_hours_ms:
+                        if is_gemini:
+                            gemini_5h_tokens += tokens_total
+                        elif is_claude:
+                            claude_5h_tokens += tokens_total
+                            
+                    # 7天內 (Weekly)
+                    if now_ms - t_created < seven_days_ms:
+                        if is_gemini:
+                            gemini_wk_tokens += tokens_total
+                        elif is_claude:
+                            claude_wk_tokens += tokens_total
+                            
+                    # 30天內 (Monthly)
+                    opencode_mo_tokens += tokens_total
+                except Exception:
+                    pass
+            
+            return {
+                "gemini_5h_tokens": gemini_5h_tokens,
+                "gemini_wk_tokens": gemini_wk_tokens,
+                "claude_5h_tokens": claude_5h_tokens,
+                "claude_wk_tokens": claude_wk_tokens,
+                "opencode_mo_tokens": opencode_mo_tokens
+            }
         except Exception:
             return None
 
@@ -151,29 +181,37 @@ try:
             make_window_rounded(self.root)
             
             self.menu = tk.Menu(self.root, tearoff=0, bg=self.card_color, fg=self.txt_primary)
-            self.menu.add_command(label="設定額度上限 (Set Limits)", command=self.set_limits_dialog)
+            self.menu.add_command(label="設定 Token 上限 (Set Limits)", command=self.set_limits_dialog)
             self.menu.add_command(label="重新整理 (Refresh)", command=self.refresh_data)
             self.menu.add_command(label="隱藏/關閉 (Exit)", command=self.root.destroy)
             self.root.bind("<Button-3>", self.show_menu)
             
-            # --- 數據 Limits Caps 上限值 ---
-            self.cap_gemini_5h = 16
-            self.cap_gemini_wk = 468
-            self.cap_opencode_mo = 800
+            # --- 數據 Limits Token 上限值 ---
+            self.cap_gemini_5h_tokens = 100000
+            self.cap_gemini_wk_tokens = 1500000
+            self.cap_claude_5h_tokens = 100000
+            self.cap_claude_wk_tokens = 1500000
+            self.cap_opencode_mo_tokens = 3000000
             
-            self.gemini_5h_percent = 63
-            self.gemini_wk_percent = 74
-            self.opencode_mo_percent = 46
+            # 目前消耗的實時 Tokens
+            self.gemini_5h_tokens = 0
+            self.gemini_wk_tokens = 0
+            self.claude_5h_tokens = 0
+            self.claude_wk_tokens = 0
+            self.opencode_mo_tokens = 0
             
+            # 實時百分比
+            self.gemini_5h_percent = 0
+            self.gemini_wk_percent = 0
+            self.claude_5h_percent = 0
+            self.claude_wk_percent = 0
+            self.opencode_mo_percent = 0
+            
+            # 倒數計時秒數
             self.gemini_5h_seconds = 3 * 3600 + 58 * 60
             self.gemini_wk_seconds = 3 * 24 * 3600 + 23 * 3600
-            self.claude_5h_percent = 100
-            self.claude_wk_percent = 100
-            
-            self.opencode_5h_percent = 0
-            self.opencode_5h_seconds = 4 * 3600 + 59 * 60
-            self.opencode_wk_percent = 0
-            self.opencode_wk_seconds = 6 * 24 * 3600
+            self.claude_5h_seconds = 4 * 3600 + 59 * 60
+            self.claude_wk_seconds = 6 * 24 * 3600
             self.opencode_mo_seconds = 8 * 24 * 3600 + 20 * 3600
             
             self.local_sessions = "--"
@@ -212,34 +250,39 @@ try:
         def bind_double_clicks(self):
             self.ring_gem_5h.bind("<Double-1>", lambda e: self.edit_single_limit("gemini_5h"))
             self.ring_gem_wk.bind("<Double-1>", lambda e: self.edit_single_limit("gemini_wk"))
-            self.ring_op_mo.bind("<Double-1>", lambda e: self.edit_single_limit("opencode_mo"))
+            self.ring_cld_5h.bind("<Double-1>", lambda e: self.edit_single_limit("claude_5h"))
+            self.ring_cld_wk.bind("<Double-1>", lambda e: self.edit_single_limit("claude_wk"))
 
         def edit_single_limit(self, limit_type):
             title_map = {
-                "gemini_5h": "Gemini 5小時對話次數上限",
-                "gemini_wk": "Gemini 每週對話次數上限",
-                "opencode_mo": "OpenCode 每月對話次數上限"
+                "gemini_5h": "Gemini 5小時 Token 上限",
+                "gemini_wk": "Gemini 每週 Token 上限",
+                "claude_5h": "Claude 5小時 Token 上限",
+                "claude_wk": "Claude 每週 Token 上限"
             }
             curr_val = {
-                "gemini_5h": self.cap_gemini_5h,
-                "gemini_wk": self.cap_gemini_wk,
-                "opencode_mo": self.cap_opencode_mo
+                "gemini_5h": self.cap_gemini_5h_tokens,
+                "gemini_wk": self.cap_gemini_wk_tokens,
+                "claude_5h": self.cap_claude_5h_tokens,
+                "claude_wk": self.cap_claude_wk_tokens
             }[limit_type]
             
             val = simpledialog.askinteger(
-                "調整監控上限 (Adjust Cap Limit)", 
+                "調整 Token 限額 (Adjust Token Cap)", 
                 f"請輸入最新的 {title_map[limit_type]}：", 
                 initialvalue=curr_val, 
-                minvalue=1, maxvalue=5000, 
+                minvalue=1000, maxvalue=100000000, 
                 parent=self.root
             )
             if val is not None:
                 if limit_type == "gemini_5h":
-                    self.cap_gemini_5h = val
+                    self.cap_gemini_5h_tokens = val
                 elif limit_type == "gemini_wk":
-                    self.cap_gemini_wk = val
-                elif limit_type == "opencode_mo":
-                    self.cap_opencode_mo = val
+                    self.cap_gemini_wk_tokens = val
+                elif limit_type == "claude_5h":
+                    self.cap_claude_5h_tokens = val
+                elif limit_type == "claude_wk":
+                    self.cap_claude_wk_tokens = val
                 self.refresh_data()
 
         def detect_edge(self, event):
@@ -397,14 +440,14 @@ try:
             self.frame_gem_5h.pack(side="left", expand=True, fill="both")
             self.ring_gem_5h = tk.Canvas(self.frame_gem_5h, bg=self.card_color, highlightthickness=0)
             self.ring_gem_5h.pack(pady=2)
-            self.lbl_gem_5h_txt = tk.Label(self.frame_gem_5h, text="5 小時額度\n--", font=("Microsoft JhengHei", 7), bg=self.card_color, fg=self.txt_secondary)
+            self.lbl_gem_5h_txt = tk.Label(self.frame_gem_5h, text="5 小時 Token\n--", font=("Microsoft JhengHei", 7), bg=self.card_color, fg=self.txt_secondary)
             self.lbl_gem_5h_txt.pack()
             
             self.frame_gem_wk = tk.Frame(frame_gem_rings, bg=self.card_color)
             self.frame_gem_wk.pack(side="right", expand=True, fill="both")
             self.ring_gem_wk = tk.Canvas(self.frame_gem_wk, bg=self.card_color, highlightthickness=0)
             self.ring_gem_wk.pack(pady=2)
-            self.lbl_gem_wk_txt = tk.Label(self.frame_gem_wk, text="每週額度\n--", font=("Microsoft JhengHei", 7), bg=self.card_color, fg=self.txt_secondary)
+            self.lbl_gem_wk_txt = tk.Label(self.frame_gem_wk, text="每週 Token\n--", font=("Microsoft JhengHei", 7), bg=self.card_color, fg=self.txt_secondary)
             self.lbl_gem_wk_txt.pack()
             
             # Claude Models
@@ -421,14 +464,14 @@ try:
             self.frame_cld_5h.pack(side="left", expand=True, fill="both")
             self.ring_cld_5h = tk.Canvas(self.frame_cld_5h, bg=self.card_color, highlightthickness=0)
             self.ring_cld_5h.pack(pady=2)
-            self.lbl_cld_5h_txt = tk.Label(self.frame_cld_5h, text="5 小時限額\n滿額", font=("Microsoft JhengHei", 7), bg=self.card_color, fg=self.txt_secondary)
+            self.lbl_cld_5h_txt = tk.Label(self.frame_cld_5h, text="5 小時 Token\n--", font=("Microsoft JhengHei", 7), bg=self.card_color, fg=self.txt_secondary)
             self.lbl_cld_5h_txt.pack()
             
             self.frame_cld_wk = tk.Frame(frame_cld_rings, bg=self.card_color)
             self.frame_cld_wk.pack(side="right", expand=True, fill="both")
             self.ring_cld_wk = tk.Canvas(self.frame_cld_wk, bg=self.card_color, highlightthickness=0)
             self.ring_cld_wk.pack(pady=2)
-            self.lbl_cld_wk_txt = tk.Label(self.frame_cld_wk, text="每週限額\n滿額", font=("Microsoft JhengHei", 7), bg=self.card_color, fg=self.txt_secondary)
+            self.lbl_cld_wk_txt = tk.Label(self.frame_cld_wk, text="每週 Token\n--", font=("Microsoft JhengHei", 7), bg=self.card_color, fg=self.txt_secondary)
             self.lbl_cld_wk_txt.pack()
 
         def init_opencode_view(self):
@@ -580,14 +623,17 @@ try:
             
             # Gemini Models
             self.draw_progress_ring(self.ring_gem_5h, self.gemini_5h_percent, self.accent_green, scale_factor)
-            self.lbl_gem_5h_txt.configure(text=f"5 小時額度\n重置 {self.format_time(self.gemini_5h_seconds)}")
+            self.lbl_gem_5h_txt.configure(text=f"5h: {self.gemini_5h_tokens//1000}K/{self.cap_gemini_5h_tokens//1000}K Tokens\n重置 {self.format_time(self.gemini_5h_seconds)}")
             
             self.draw_progress_ring(self.ring_gem_wk, self.gemini_wk_percent, self.accent_green, scale_factor)
-            self.lbl_gem_wk_txt.configure(text=f"每週額度\n重置 {self.format_time(self.gemini_wk_seconds)}")
+            self.lbl_gem_wk_txt.configure(text=f"Wk: {self.gemini_wk_tokens//1000}K/{self.cap_gemini_wk_tokens//1000}K\n重置 {self.format_time(self.gemini_wk_seconds)}")
             
             # Claude Models
             self.draw_progress_ring(self.ring_cld_5h, self.claude_5h_percent, self.accent_green, scale_factor)
+            self.lbl_cld_5h_txt.configure(text=f"5h: {self.claude_5h_tokens//1000}K/{self.cap_claude_5h_tokens//1000}K Tokens\n重置 {self.format_time(self.claude_5h_seconds)}")
+            
             self.draw_progress_ring(self.ring_cld_wk, self.claude_wk_percent, self.accent_green, scale_factor)
+            self.lbl_cld_wk_txt.configure(text=f"Wk: {self.claude_wk_tokens//1000}K/{self.cap_claude_wk_tokens//1000}K\n重置 {self.format_time(self.claude_wk_seconds)}")
 
             # OpenCode Go
             self.draw_progress_ring(self.ring_op_5h, self.opencode_5h_percent, self.accent_blue, scale_factor)
@@ -610,17 +656,18 @@ try:
 
         def set_limits_dialog(self):
             val = simpledialog.askstring(
-                "設定額度上限 (Set Caps)", 
-                "請輸入您後台設定的上限，以逗號分隔\n格式: 5H上限, 每週上限, 每月上限\n(例如: 16, 467, 800)", 
+                "設定 Token 上限 (Set Caps)", 
+                "請輸入您後台設定的 Token 上限，以逗號分隔\n格式: Gemini5H, GeminiWk, Claude5H, ClaudeWk\n(例如: 100000, 1500000, 100000, 1500000)", 
                 parent=self.root
             )
             if val:
                 try:
                     parts = [int(p.strip()) for p in val.split(',')]
-                    if len(parts) >= 3:
-                        self.cap_gemini_5h = parts[0]
-                        self.cap_gemini_wk = parts[1]
-                        self.cap_opencode_mo = parts[2]
+                    if len(parts) >= 4:
+                        self.cap_gemini_5h_tokens = parts[0]
+                        self.cap_gemini_wk_tokens = parts[1]
+                        self.cap_claude_5h_tokens = parts[2]
+                        self.cap_claude_wk_tokens = parts[3]
                         self.refresh_data()
                 except Exception:
                     pass
@@ -640,13 +687,22 @@ try:
                     self.local_avg_cost = data['avg_cost']
                     
                     if db_data:
-                        # 100% 自動化即時監控：透過本地資料庫的實時對話統計與 Upper Caps 比例計算出百分比！
-                        self.gemini_5h_percent = min(100, int((db_data["msg_5h"] / self.cap_gemini_5h) * 100))
-                        self.gemini_wk_percent = min(100, int((db_data["msg_7d"] / self.cap_gemini_wk) * 100))
-                        self.opencode_mo_percent = min(100, int((db_data["msg_30d"] / self.cap_opencode_mo) * 100))
+                        # 實時 Token 統計
+                        self.gemini_5h_tokens = db_data["gemini_5h_tokens"]
+                        self.gemini_wk_tokens = db_data["gemini_wk_tokens"]
+                        self.claude_5h_tokens = db_data["claude_5h_tokens"]
+                        self.claude_wk_tokens = db_data["claude_wk_tokens"]
+                        self.opencode_mo_tokens = db_data["opencode_mo_tokens"]
+                        
+                        # 換算百分比 (基於真實 Token 消耗計量)
+                        self.gemini_5h_percent = min(100, int((self.gemini_5h_tokens / self.cap_gemini_5h_tokens) * 100))
+                        self.gemini_wk_percent = min(100, int((self.gemini_wk_tokens / self.cap_gemini_wk_tokens) * 100))
+                        self.claude_5h_percent = min(100, int((self.claude_5h_tokens / self.cap_claude_5h_tokens) * 100))
+                        self.claude_wk_percent = min(100, int((self.claude_wk_tokens / self.cap_claude_wk_tokens) * 100))
+                        self.opencode_mo_percent = min(100, int((self.opencode_mo_tokens / self.cap_opencode_mo_tokens) * 100))
                     
                     self.refresh_ui()
-                    self.status_lbl.configure(text="更新 剛才")
+                    self.status_lbl.configure(text="更新 剛才 (SQLite Real-time Tokens 監控)")
                     
                 self.root.after(0, update_ui)
                 
@@ -657,10 +713,10 @@ try:
                 self.gemini_5h_seconds -= 1
             if self.gemini_wk_seconds > 0:
                 self.gemini_wk_seconds -= 1
-            if self.opencode_5h_seconds > 0:
-                self.opencode_5h_seconds -= 1
-            if self.opencode_wk_seconds > 0:
-                self.opencode_wk_seconds -= 1
+            if self.claude_5h_seconds > 0:
+                self.claude_5h_seconds -= 1
+            if self.claude_wk_seconds > 0:
+                self.claude_wk_seconds -= 1
             if self.opencode_mo_seconds > 0:
                 self.opencode_mo_seconds -= 1
                 
