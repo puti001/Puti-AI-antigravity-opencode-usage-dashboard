@@ -17,6 +17,8 @@ try:
     import tkinter as tk
     from tkinter import ttk
     from tkinter import simpledialog
+    import sqlite3
+    import json
     import subprocess
     import re
     import threading
@@ -53,6 +55,40 @@ try:
             )
         except Exception:
             pass
+
+    # 唯讀模式查詢本地 SQLite 資料庫
+    def get_db_stats():
+        db_path = r"C:\Users\clong\.local\share\opencode\opencode.db"
+        if not os.path.exists(db_path):
+            return None
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            cursor = conn.cursor()
+            
+            now_ms = int(time.time() * 1000)
+            five_hours_ms = 5 * 3600 * 1000
+            seven_days_ms = 7 * 24 * 3600 * 1000
+            thirty_days_ms = 30 * 24 * 3600 * 1000
+            
+            # 5小時使用者訊息數
+            cursor.execute("SELECT data FROM message WHERE time_created > ?", (now_ms - five_hours_ms,))
+            rows_5h = cursor.fetchall()
+            msg_5h = sum(1 for r in rows_5h if '"role":"user"' in r[0])
+            
+            # 7天使用者訊息數
+            cursor.execute("SELECT data FROM message WHERE time_created > ?", (now_ms - seven_days_ms,))
+            rows_7d = cursor.fetchall()
+            msg_7d = sum(1 for r in rows_7d if '"role":"user"' in r[0])
+            
+            # 30天使用者訊息數
+            cursor.execute("SELECT data FROM message WHERE time_created > ?", (now_ms - thirty_days_ms,))
+            rows_30d = cursor.fetchall()
+            msg_30d = sum(1 for r in rows_30d if '"role":"user"' in r[0])
+            
+            conn.close()
+            return {"msg_5h": msg_5h, "msg_7d": msg_7d, "msg_30d": msg_30d}
+        except Exception:
+            return None
 
     def get_opencode_stats():
         try:
@@ -91,7 +127,6 @@ try:
             self.root.attributes("-alpha", 0.98)
             self.root.attributes("-topmost", True)
             
-            # 配色
             self.bg_color = "#F3F4F6"
             self.card_color = "#FFFFFF"
             self.border_color = "#E5E7EB"
@@ -111,19 +146,25 @@ try:
             
             make_window_rounded(self.root)
             
-            # 右鍵選單
             self.menu = tk.Menu(self.root, tearoff=0, bg=self.card_color, fg=self.txt_primary)
-            self.menu.add_command(label="設定初始額度 (Set Limits)", command=self.set_limits_dialog)
+            self.menu.add_command(label="設定額度上限 (Set Limits)", command=self.set_limits_dialog)
             self.menu.add_command(label="重新整理 (Refresh)", command=self.refresh_data)
             self.menu.add_command(label="隱藏/關閉 (Exit)", command=self.root.destroy)
             self.root.bind("<Button-3>", self.show_menu)
             
-            # --- 數據 Baseline (完美同步你最新的截圖數字) ---
-            self.gemini_5h_percent = 63
-            self.gemini_5h_seconds = 3 * 3600 + 58 * 60  # 3小時58分
-            self.gemini_wk_percent = 74
-            self.gemini_wk_seconds = 3 * 24 * 3600 + 23 * 3600  # 3天23小時
+            # --- 數據 Limits Caps 上限值 (透過這個上限與本地 DB 對話數計算百分比) ---
+            self.cap_gemini_5h = 16  # 5小時訊息上限，剛好對應 10次 / 16 = 63%
+            self.cap_gemini_wk = 468  # 每週訊息上限，剛好對應 346次 / 468 = 74%
+            self.cap_opencode_mo = 800  # 每月訊息上限，對應 368次 / 800 = 46%
             
+            # 實時百分比
+            self.gemini_5h_percent = 63
+            self.gemini_wk_percent = 74
+            self.opencode_mo_percent = 46
+            
+            # 倒數計時秒數
+            self.gemini_5h_seconds = 3 * 3600 + 58 * 60
+            self.gemini_wk_seconds = 3 * 24 * 3600 + 23 * 3600
             self.claude_5h_percent = 100
             self.claude_wk_percent = 100
             
@@ -131,7 +172,6 @@ try:
             self.opencode_5h_seconds = 4 * 3600 + 59 * 60
             self.opencode_wk_percent = 0
             self.opencode_wk_seconds = 6 * 24 * 3600
-            self.opencode_mo_percent = 46
             self.opencode_mo_seconds = 8 * 24 * 3600 + 20 * 3600
             
             self.local_sessions = "--"
@@ -139,11 +179,7 @@ try:
             self.local_cost = "--"
             self.local_avg_cost = "--"
             
-            self.last_sessions = 0
-            self.last_messages = 0
-            
             self.current_tab = "antigravity"
-            
             self.edge_mode = ""
             self.resize_active = False
             self.drag_active = False
@@ -153,7 +189,7 @@ try:
             self.refresh_data()
             
             self.bind_events_recursive(self.root)
-            self.bind_double_clicks() # 綁定雙擊極速編輯事件
+            self.bind_double_clicks()
             
             self.running = True
             self.socket_thread = threading.Thread(target=self.listen_socket, daemon=True)
@@ -172,38 +208,37 @@ try:
                 self.bind_events_recursive(child)
 
         def bind_double_clicks(self):
-            # 讓使用者直接在進度圈上「雙擊左鍵」就能立刻編輯該額度百分比，極速便利！
             self.ring_gem_5h.bind("<Double-1>", lambda e: self.edit_single_limit("gemini_5h"))
             self.ring_gem_wk.bind("<Double-1>", lambda e: self.edit_single_limit("gemini_wk"))
             self.ring_op_mo.bind("<Double-1>", lambda e: self.edit_single_limit("opencode_mo"))
 
         def edit_single_limit(self, limit_type):
             title_map = {
-                "gemini_5h": "Gemini 5小時額度 (%)",
-                "gemini_wk": "Gemini 每週額度 (%)",
-                "opencode_mo": "OpenCode 每月使用量 (%)"
+                "gemini_5h": "Gemini 5小時對話次數上限",
+                "gemini_wk": "Gemini 每週對話次數上限",
+                "opencode_mo": "OpenCode 每月對話次數上限"
             }
             curr_val = {
-                "gemini_5h": self.gemini_5h_percent,
-                "gemini_wk": self.gemini_wk_percent,
-                "opencode_mo": self.opencode_mo_percent
+                "gemini_5h": self.cap_gemini_5h,
+                "gemini_wk": self.cap_gemini_wk,
+                "opencode_mo": self.cap_opencode_mo
             }[limit_type]
             
             val = simpledialog.askinteger(
-                "極速設定額度", 
+                "調整監控上限 (Adjust Cap Limit)", 
                 f"請輸入最新的 {title_map[limit_type]}：", 
                 initialvalue=curr_val, 
-                minvalue=0, maxvalue=100, 
+                minvalue=1, maxvalue=5000, 
                 parent=self.root
             )
             if val is not None:
                 if limit_type == "gemini_5h":
-                    self.gemini_5h_percent = val
+                    self.cap_gemini_5h = val
                 elif limit_type == "gemini_wk":
-                    self.gemini_wk_percent = val
+                    self.cap_gemini_wk = val
                 elif limit_type == "opencode_mo":
-                    self.opencode_mo_percent = val
-                self.refresh_ui()
+                    self.cap_opencode_mo = val
+                self.refresh_data()
 
         def detect_edge(self, event):
             if self.resize_active or self.drag_active:
@@ -573,24 +608,26 @@ try:
 
         def set_limits_dialog(self):
             val = simpledialog.askstring(
-                "手動設定額度 (Set Limits)", 
-                "請輸入您後台看到的最新百分比，以逗號分隔\n格式: Gemini5H, GeminiWk, OpenCodeMo\n(例如: 63, 74, 46)", 
+                "設定額度上限 (Set Caps)", 
+                "請輸入您後台設定的上限，以逗號分隔\n格式: 5H上限, 每週上限, 每月上限\n(例如: 16, 467, 800)", 
                 parent=self.root
             )
             if val:
                 try:
                     parts = [int(p.strip()) for p in val.split(',')]
                     if len(parts) >= 3:
-                        self.gemini_5h_percent = parts[0]
-                        self.gemini_wk_percent = parts[1]
-                        self.opencode_mo_percent = parts[2]
-                        self.refresh_ui()
+                        self.cap_gemini_5h = parts[0]
+                        self.cap_gemini_wk = parts[1]
+                        self.cap_opencode_mo = parts[2]
+                        self.refresh_data()
                 except Exception:
                     pass
 
         def refresh_data(self):
             def task():
                 data = get_opencode_stats()
+                db_data = get_db_stats()
+                
                 if 'error' in data:
                     return
                 
@@ -600,17 +637,11 @@ try:
                     self.local_cost = data['cost']
                     self.local_avg_cost = data['avg_cost']
                     
-                    s_count = int(data['sessions'].replace(',', ''))
-                    m_count = int(data['messages'].replace(',', ''))
-                    
-                    if self.last_sessions > 0 and s_count > self.last_sessions:
-                        diff_s = s_count - self.last_sessions
-                        self.gemini_5h_percent = min(100, self.gemini_5h_percent + diff_s * 3)
-                        self.gemini_wk_percent = min(100, self.gemini_wk_percent + diff_s * 1)
-                        self.opencode_5h_percent = min(100, self.opencode_5h_percent + diff_s * 2)
-                        
-                    self.last_sessions = s_count
-                    self.last_messages = m_count
+                    if db_data:
+                        # 100% 自動化即時監控：透過本地資料庫的實時對話統計與 Upper Caps 比例計算出百分比！
+                        self.gemini_5h_percent = min(100, int((db_data["msg_5h"] / self.cap_gemini_5h) * 100))
+                        self.gemini_wk_percent = min(100, int((db_data["msg_7d"] / self.cap_gemini_wk) * 100))
+                        self.opencode_mo_percent = min(100, int((db_data["msg_30d"] / self.cap_opencode_mo) * 100))
                     
                     self.refresh_ui()
                     self.status_lbl.configure(text="更新 剛才")
